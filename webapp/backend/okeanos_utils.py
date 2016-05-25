@@ -364,9 +364,11 @@ def scale_cluster(token, cluster_id, cluster_delta, status='Pending'):
         master_ip = cluster_to_scale.master_IP
         user_id = new_slave['uuid']
         image_id = new_slave['image_id']
+        linux_dist = get_system_dist(cluster_to_scale.os_image)
         try:
             for new_slave in list_of_new_slaves:
-                reroute_ssh_to_slaves(new_slave['port'], new_slave['private_ip'], master_ip, new_slave['password'], '')
+                reroute_ssh_to_slaves(new_slave['port'], new_slave['private_ip'], master_ip, new_slave['password'],
+                                      '',linux_dist)
         except Exception, e:
             msg = '{0}. Scale action failed. Cluster rolled back'.format(str(e.args[0]))
             set_cluster_state(token, cluster_id, msg)
@@ -421,6 +423,16 @@ def destroy_cluster(token, cluster_id, master_IP='', status='Destroyed'):
     """
     cluster_to_delete = ClusterInfo.objects.get(id=cluster_id)
     cluster_name = cluster_to_delete.cluster_name
+    # status is already destroyed or failed, only clean up database 
+    if cluster_to_delete.cluster_status not in [const_cluster_status_active,const_cluster_status_pending]:
+        current_task.update_state(state="Removing Record")
+        try:
+            db_cluster_delete(token,cluster_id)
+            current_task.update_state(state="Cluster Record Removed")
+        except Exception,e:
+            msg = str(e.args[0])
+            raise ClientError(msg, error_cluster_corrupt)
+        return cluster_name
     # cluster exists on cyclades, operate on ~okeanos infrastructure for removal, update database
     current_task.update_state(state="Started")
     servers_to_delete = []
@@ -518,15 +530,6 @@ def destroy_cluster(token, cluster_id, master_IP='', status='Destroyed'):
 
     state= 'Cluster with public IP [%s] was deleted ' % float_ip_to_delete
     set_cluster_state(token, cluster_id, state, status=status)
-    # status is already destroyed or failed, only clean up database 
-    if cluster_to_delete.cluster_status not in [const_cluster_status_active,const_cluster_status_pending]:
-        current_task.update_state(state="Removing Record")
-        try:
-            db_cluster_delete(token,cluster_id)
-            current_task.update_state(state="Cluster Record Removed")
-        except Exception,e:
-            msg = str(e.args[0])
-            raise ClientError(msg, error_cluster_corrupt)
     # Everything deleted as expected
     if not list_of_errors:
         return cluster_name
@@ -534,6 +537,17 @@ def destroy_cluster(token, cluster_id, master_IP='', status='Destroyed'):
     else:
         msg = 'Error while deleting cluster'
         raise ClientError(msg, list_of_errors[0])
+
+
+def get_system_dist(name):
+    """
+    Get the Debian distribution given the name or id of an orka image.
+    """   
+    # Check if orka image is in Cloudera category which means Debian wheezy distribution.
+    if OrkaImage.objects.get(image_name=name).image_category.category_name == 'Cloudera':
+        return 'wheezy'
+    # Else return Debian jessie distribution.
+    return 'jessie'
 
 
 def check_credentials(token, auth_url=auth_url):
